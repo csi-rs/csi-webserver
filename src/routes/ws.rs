@@ -11,26 +11,24 @@ use crate::state::AppState;
 
 // ─── GET /api/ws ────────────────────────────────────────────────────────────
 
-/// Upgrade an HTTP connection to a WebSocket and stream CSI packets as JSON.
+/// Upgrade an HTTP connection to a WebSocket and stream raw CSI frames.
 ///
-/// Each message sent to the client is the JSON-serialised form of a
-/// `CsiPacket` — one per received CSI frame from the ESP32.
-pub async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+/// Each binary message sent to the client is one unmodified frame as received
+/// from the ESP32 over serial. The client is responsible for decoding based
+/// on the active log mode (e.g. array-list text or COBS binary).
+pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     let rx = state.csi_tx.subscribe();
     ws.on_upgrade(|socket| handle_socket(socket, rx))
 }
 
-async fn handle_socket(mut socket: WebSocket, mut rx: broadcast::Receiver<String>) {
+async fn handle_socket(mut socket: WebSocket, mut rx: broadcast::Receiver<Vec<u8>>) {
     loop {
         tokio::select! {
-            // ── Forward CSI JSON to the WebSocket client ──────────────────
+            // ── Forward raw CSI frame to the WebSocket client ─────────────
             result = rx.recv() => {
                 match result {
-                    Ok(json) => {
-                        if socket.send(Message::Text(json.into())).await.is_err() {
+                    Ok(data) => {
+                        if socket.send(Message::Binary(data.into())).await.is_err() {
                             // Client disconnected or send failed.
                             break;
                         }

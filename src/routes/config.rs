@@ -2,7 +2,8 @@ use axum::{Json, extract::State, http::StatusCode};
 
 use crate::{
     models::{
-        ApiResponse, CollectionModeConfig, CsiConfig, DeviceConfig, TrafficConfig, WifiConfig,
+        ApiResponse, CollectionModeConfig, CsiConfig, DeviceConfig, LogModeConfig, TrafficConfig,
+        WifiConfig,
     },
     state::AppState,
 };
@@ -17,9 +18,7 @@ pub async fn get_config(State(state): State<AppState>) -> Json<DeviceConfig> {
 
 // ─── POST /api/config/reset ─────────────────────────────────────────────────
 
-pub async fn reset_config(
-    State(state): State<AppState>,
-) -> (StatusCode, Json<ApiResponse>) {
+pub async fn reset_config(State(state): State<AppState>) -> (StatusCode, Json<ApiResponse>) {
     let result = send_cmd(&state, "reset-config".to_string()).await;
     if result.0 == StatusCode::OK {
         *state.config.lock().await = DeviceConfig::default();
@@ -77,6 +76,29 @@ pub async fn set_collection_mode(
     let result = send_cmd(&state, cmd).await;
     if result.0 == StatusCode::OK {
         state.config.lock().await.collection_mode = Some(body.mode);
+    }
+    result
+}
+
+// ─── POST /api/config/log-mode ─────────────────────────────────────────────
+
+/// Set the log mode on the device and update the serial task's frame delimiter.
+///
+/// Known modes (passed through verbatim to `esp-csi-cli-rs`):
+/// - `"array-list"` — newline-delimited text packets
+/// - `"cobs"`       — COBS-encoded binary frames, null-byte delimited
+/// - `"none"`       — disable CSI output
+pub async fn set_log_mode(
+    State(state): State<AppState>,
+    Json(body): Json<LogModeConfig>,
+) -> (StatusCode, Json<ApiResponse>) {
+    let cmd = body.to_cli_command();
+    let result = send_cmd(&state, cmd).await;
+    if result.0 == StatusCode::OK {
+        let mut cfg = state.config.lock().await;
+        cfg.log_mode = Some(body.mode.clone());
+        // Notify the serial task to switch its frame delimiter immediately.
+        let _ = state.log_mode_tx.send(body.mode);
     }
     result
 }

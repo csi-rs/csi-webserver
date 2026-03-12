@@ -9,6 +9,7 @@ pub struct DeviceConfig {
     pub sta_ssid: Option<String>,
     pub traffic_hz: Option<u32>,
     pub collection_mode: Option<String>,
+    pub log_mode: Option<String>,
 }
 
 // ─── HTTP request bodies ───────────────────────────────────────────────────
@@ -132,6 +133,17 @@ impl CollectionModeConfig {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct LogModeConfig {
+    pub mode: String,
+}
+
+impl LogModeConfig {
+    pub fn to_cli_command(&self) -> String {
+        format!("set-log-mode --mode={}", self.mode)
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct StartConfig {
     /// Collection duration in seconds; omit for indefinite collection.
     pub duration: Option<u32>,
@@ -152,111 +164,4 @@ impl StartConfig {
 pub struct ApiResponse {
     pub success: bool,
     pub message: String,
-}
-
-// ─── CSI packet (parsed from array-list format) ───────────────────────────
-
-/// Parsed representation of one `array-list` line from esp-csi-cli-rs.
-///
-/// Wire format (one line per packet):
-/// `[seq,rssi,rate,noise_floor,ch,ts,sig_len,rx_state,sec_ch,sgi,ant,ampdu,
-///   sig_mode,mcs,bw,smooth,not_sound,aggr,stbc,fec,sig_len2,data_len,[csi...]]`
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CsiPacket {
-    pub sequence_number: u16,
-    pub rssi: i32,
-    pub rate: u32,
-    pub noise_floor: i32,
-    pub channel: u32,
-    pub timestamp: u32,
-    pub sig_len: u32,
-    pub rx_state: u32,
-    pub secondary_channel: u32,
-    pub sgi: u32,
-    pub antenna: u32,
-    pub ampdu_cnt: u32,
-    pub sig_mode: u32,
-    pub mcs: u32,
-    pub bandwidth: u32,
-    pub smoothing: u32,
-    pub not_sounding: u32,
-    pub aggregation: u32,
-    pub stbc: u32,
-    pub fec_coding: u32,
-    pub csi_data_len: u16,
-    pub csi_data: Vec<i8>,
-}
-
-fn get_u32(scalars: &[&str], idx: usize) -> Option<u32> {
-    scalars.get(idx)?.trim().parse().ok()
-}
-
-fn get_i32(scalars: &[&str], idx: usize) -> Option<i32> {
-    scalars.get(idx)?.trim().parse().ok()
-}
-
-fn get_u16(scalars: &[&str], idx: usize) -> Option<u16> {
-    scalars.get(idx)?.trim().parse().ok()
-}
-
-impl CsiPacket {
-    /// Attempt to parse a single `array-list` output line into a `CsiPacket`.
-    /// Returns `None` if the line is not a valid CSI packet.
-    pub fn parse_array_list(line: &str) -> Option<Self> {
-        let line = line.trim();
-        if !line.starts_with('[') || !line.ends_with(']') {
-            return None;
-        }
-
-        // Strip outermost brackets
-        let content = &line[1..line.len() - 1];
-
-        // Locate the nested inner CSI data array [...]
-        let inner_start = content.rfind('[')?;
-        let inner_end = content.rfind(']')?;
-        if inner_start >= inner_end {
-            return None;
-        }
-
-        // Parse inner CSI i8 samples
-        let csi_data: Vec<i8> = content[inner_start + 1..inner_end]
-            .split(',')
-            .filter_map(|s| s.trim().parse::<i8>().ok())
-            .collect();
-
-        // Scalar fields come before the inner array; trim trailing comma/space
-        let scalars_str = content[..inner_start].trim_end_matches(|c: char| c == ',' || c.is_whitespace());
-        let scalars: Vec<&str> = scalars_str.split(',').collect();
-
-        // Require at least 22 scalar positions (indices 0-21)
-        if scalars.len() < 22 {
-            return None;
-        }
-
-        Some(CsiPacket {
-            sequence_number:  get_u16(&scalars, 0)?,
-            rssi:             get_i32(&scalars, 1)?,
-            rate:             get_u32(&scalars, 2)?,
-            noise_floor:      get_i32(&scalars, 3)?,
-            channel:          get_u32(&scalars, 4)?,
-            timestamp:        get_u32(&scalars, 5)?,
-            sig_len:          get_u32(&scalars, 6)?,
-            rx_state:         get_u32(&scalars, 7)?,
-            secondary_channel: get_u32(&scalars, 8)?,
-            sgi:              get_u32(&scalars, 9)?,
-            antenna:          get_u32(&scalars, 10)?,
-            ampdu_cnt:        get_u32(&scalars, 11)?,
-            sig_mode:         get_u32(&scalars, 12)?,
-            mcs:              get_u32(&scalars, 13)?,
-            bandwidth:        get_u32(&scalars, 14)?,
-            smoothing:        get_u32(&scalars, 15)?,
-            not_sounding:     get_u32(&scalars, 16)?,
-            aggregation:      get_u32(&scalars, 17)?,
-            stbc:             get_u32(&scalars, 18)?,
-            fec_coding:       get_u32(&scalars, 19)?,
-            // scalars[20] = repeated sig_len — intentionally skipped
-            csi_data_len:     get_u16(&scalars, 21)?,
-            csi_data,
-        })
-    }
 }

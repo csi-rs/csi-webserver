@@ -1,8 +1,6 @@
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio_serial::{SerialPortBuilderExt, SerialPortType};
-
-use crate::models::CsiPacket;
 
 const DEFAULT_BAUD_RATE: u32 = 115_200;
 
@@ -48,7 +46,9 @@ pub fn detect_esp_port() -> Result<String, String> {
                     .unwrap_or_default();
                 tracing::info!(
                     "Auto-detected ESP port: {} (VID:{:04X} PID:{:04X}{product})",
-                    port.port_name, info.vid, info.pid,
+                    port.port_name,
+                    info.vid,
+                    info.pid,
                 );
                 return Ok(port.port_name.clone());
             }
@@ -75,15 +75,18 @@ pub fn detect_esp_port() -> Result<String, String> {
 
 /// Background task: owns the serial port for its lifetime.
 ///
-/// - Reads incoming lines; those that parse as CSI packets are JSON-serialised
-///   and broadcast to all WebSocket subscribers via `csi_tx`.
+/// - Reads incoming frames from the serial port and broadcasts the raw bytes
+///   to all WebSocket subscribers via `csi_tx`. The frame delimiter adapts to
+///   the active log mode: `\0` for COBS, `\n` for all text-based modes.
 /// - Watches `cmd_rx` for outgoing CLI command strings and writes them to the
 ///   port, appending a newline.
-/// - Enforces `array-list` log mode immediately after opening the port.
+/// - Does NOT set a log mode on startup — call `POST /api/config/log-mode` to
+///   configure the device before collecting data.
 pub async fn run_serial_task(
     port_path: String,
     mut cmd_rx: mpsc::Receiver<String>,
-    csi_tx: broadcast::Sender<String>,
+    csi_tx: broadcast::Sender<Vec<u8>>,
+    log_mode_rx: watch::Receiver<String>,
 ) {
     let baud = std::env::var("CSI_BAUD_RATE")
         .ok()
@@ -101,42 +104,39 @@ pub async fn run_serial_task(
     tracing::info!("Opened serial port {port_path} @ {baud} baud");
 
     let (reader, mut writer) = tokio::io::split(stream);
-    let mut lines = BufReader::new(reader).lines();
-
-    // Enforce array-list mode on startup so we always receive parseable output.
-    if let Err(e) = writer.write_all(b"set-log-mode --mode=array-list\n").await {
-        tracing::error!("Failed to send init command to {port_path}: {e}");
-        return;
-    }
-    tracing::info!("Sent init: set-log-mode --mode=array-list");
+    let mut reader = BufReader::new(reader);
+    let mut buf = Vec::new();
 
     loop {
+        // Pick the frame delimiter based on the current log mode.
+        // COBS uses null-byte (0x00) framing; all text modes use newline.
+        let delimiter = {
+            let mode = log_mode_rx.borrow();
+            if mode.to_ascii_lowercase().contains("cobs") {
+                b'\0'
+            } else {
+                b'\n'
+            }
+        };
+
         tokio::select! {
             // ── Incoming serial data ──────────────────────────────────────
-            result = lines.next_line() => {
+            result = reader.read_until(delimiter, &mut buf) => {
                 match result {
-                    Ok(Some(line)) => {
-                        match CsiPacket::parse_array_list(&line) {
-                            Some(packet) => {
-                                match serde_json::to_string(&packet) {
-                                    Ok(json) => {
-                                        // Ignore errors — zero subscribers is fine.
-                                        let _ = csi_tx.send(json);
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Failed to serialise CSI packet: {e}");
-                                    }
-                                }
-                            }
-                            None => {
-                                // Non-CSI device output (boot messages, errors, etc.)
-                                tracing::trace!("ESP32: {line}");
-                            }
-                        }
-                    }
-                    Ok(None) => {
+                    Ok(0) => {
                         tracing::warn!("Serial port {port_path} closed (EOF)");
                         break;
+                    }
+                    Ok(_) => {
+                        // Strip the trailing delimiter before forwarding.
+                        if buf.last() == Some(&delimiter) {
+                            buf.pop();
+                        }
+                        if !buf.is_empty() {
+                            // Ignore send errors — zero subscribers is fine.
+                            let _ = csi_tx.send(buf.clone());
+                        }
+                        buf.clear();
                     }
                     Err(e) => {
                         tracing::error!("Serial read error on {port_path}: {e}");

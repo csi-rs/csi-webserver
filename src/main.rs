@@ -9,7 +9,7 @@ use axum::{
     Router,
     routing::{get, post},
 };
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 
 use models::DeviceConfig;
 use state::AppState;
@@ -34,35 +34,45 @@ async fn main() {
     };
 
     // ── Channels ──────────────────────────────────────────────────────────
-    // cmd_tx  → serial task (CLI commands)
-    // csi_tx  → all WebSocket clients (parsed CSI JSON)
+    // cmd_tx      → serial task (CLI commands)
+    // csi_tx      → all WebSocket clients (raw CSI frame bytes)
+    // log_mode_tx → serial task (frame-delimiter mode)
     let (cmd_tx, cmd_rx) = mpsc::channel::<String>(64);
-    let (csi_tx, _) = broadcast::channel::<String>(256);
+    let (csi_tx, _) = broadcast::channel::<Vec<u8>>(256);
+    let (log_mode_tx, log_mode_rx) = watch::channel(String::new());
 
     // ── Shared state ──────────────────────────────────────────────────────
     let state = AppState {
         cmd_tx,
         csi_tx: csi_tx.clone(),
+        log_mode_tx: Arc::new(log_mode_tx),
         config: Arc::new(Mutex::new(DeviceConfig::default())),
     };
 
     // ── Serial background task ────────────────────────────────────────────
-    tokio::spawn(serial::run_serial_task(port_path, cmd_rx, csi_tx));
+    tokio::spawn(serial::run_serial_task(port_path, cmd_rx, csi_tx, log_mode_rx));
 
     // ── Router ────────────────────────────────────────────────────────────
     let app = Router::new()
-        .route("/",                             get(|| async { "CSI Server Active" }))
+        .route("/", get(|| async { "CSI Server Active" }))
         // Config
-        .route("/api/config",                   get(routes::config::get_config))
-        .route("/api/config/reset",             post(routes::config::reset_config))
-        .route("/api/config/wifi",              post(routes::config::set_wifi))
-        .route("/api/config/traffic",           post(routes::config::set_traffic))
-        .route("/api/config/csi",               post(routes::config::set_csi))
-        .route("/api/config/collection-mode",   post(routes::config::set_collection_mode))
+        .route("/api/config", get(routes::config::get_config))
+        .route("/api/config/reset", post(routes::config::reset_config))
+        .route("/api/config/wifi", post(routes::config::set_wifi))
+        .route("/api/config/traffic", post(routes::config::set_traffic))
+        .route("/api/config/csi", post(routes::config::set_csi))
+        .route(
+            "/api/config/collection-mode",
+            post(routes::config::set_collection_mode),
+        )
+        .route("/api/config/log-mode", post(routes::config::set_log_mode))
         // Control
-        .route("/api/control/start",            post(routes::control::start_collection))
+        .route(
+            "/api/control/start",
+            post(routes::control::start_collection),
+        )
         // WebSocket
-        .route("/api/ws",                       get(routes::ws::ws_handler))
+        .route("/api/ws", get(routes::ws::ws_handler))
         .with_state(state);
 
     // ── Serve ─────────────────────────────────────────────────────────────
