@@ -108,6 +108,7 @@ pub async fn run_serial_task(
 
     tracing::info!("Opened serial port {port_path} @ {baud} baud");
 
+
     let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
     let mut buf = Vec::new();

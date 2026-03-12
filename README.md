@@ -226,6 +226,17 @@ Start CSI data collection on the device. Creates a new session and generates a t
 ```
 Omit the body (or `duration`) for indefinite collection.
 
+> ⚠️ **Indefinite collection warning** — if `duration` is omitted, the ESP32 will collect CSI data indefinitely until it is reset. While the device is actively collecting, **new configuration commands (Wi-Fi mode, channel, log format, etc.) will be ignored**. To reconfigure the device you must first reset it via `POST /api/control/reset`, wait for it to boot, and then send your new configuration before starting collection again.
+
+---
+
+#### `POST /api/control/reset`
+Reset the ESP32 by pulsing the RTS line (asserts EN low for 100 ms, then releases it). The chip reboots and is ready to accept new configuration commands.
+
+No request body required.
+
+> ⚠️ **Adapter support** — this relies on the USB-UART adapter's RTS pin being wired to the ESP32's EN pin, which is the case on all standard devkits (CP210x, CH340, Espressif native USB). Custom or bare-module boards without this circuit will receive a `500` response; in that case reset the device manually by pressing the EN/RST button.
+
 ---
 
 ### WebSocket

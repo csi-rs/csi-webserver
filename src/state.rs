@@ -6,6 +6,10 @@ use crate::models::{DeviceConfig, OutputMode};
 /// Shared application state, cheaply cloned into every route handler via Axum's `State` extractor.
 #[derive(Clone)]
 pub struct AppState {
+    /// USB serial port path used to reach the ESP32 (e.g. `/dev/ttyUSB0`).
+    /// Stored so route handlers can open a short-lived second fd for control
+    /// operations such as RTS-triggered reset.
+    pub port_path: Arc<String>,
     /// Send CLI command strings to the serial background task.
     pub cmd_tx: mpsc::Sender<String>,
     /// Broadcast raw CSI frame bytes to all connected WebSocket clients.

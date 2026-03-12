@@ -13,3 +13,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["clock"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+debug = false

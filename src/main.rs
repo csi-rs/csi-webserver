@@ -65,6 +65,7 @@ async fn main() {
 
     // ── Shared state ──────────────────────────────────────────────────────
     let state = AppState {
+        port_path: Arc::new(port_path.clone()),
         cmd_tx,
         csi_tx: csi_tx.clone(),
         log_mode_tx: Arc::new(log_mode_tx),
@@ -106,6 +107,7 @@ async fn main() {
             "/api/control/start",
             post(routes::control::start_collection),
         )
+        .route("/api/control/reset", post(routes::control::reset_esp32))
         // WebSocket
         .route("/api/ws", get(routes::ws::ws_handler))
         .with_state(state);
