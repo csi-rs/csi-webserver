@@ -158,6 +158,26 @@ impl StartConfig {
     }
 }
 
+// ─── Output mode ──────────────────────────────────────────────────────────
+
+/// Controls where CSI frames are sent after being read from the serial port.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputMode {
+    /// Stream frames to WebSocket clients only (default).
+    #[default]
+    Stream,
+    /// Write frames to a session dump file only; /api/ws returns 403.
+    Dump,
+    /// Both stream to WebSocket clients and write to the dump file.
+    Both,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OutputModeConfig {
+    pub mode: String,
+}
+
 // ─── API response ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]

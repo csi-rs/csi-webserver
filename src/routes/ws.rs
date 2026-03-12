@@ -1,24 +1,43 @@
 use axum::{
+    Json,
     extract::{
         State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    response::IntoResponse,
+    http::StatusCode,
+    response::{IntoResponse, Response},
 };
 use tokio::sync::broadcast;
 
-use crate::state::AppState;
+use crate::{
+    models::{ApiResponse, OutputMode},
+    state::AppState,
+};
 
 // ─── GET /api/ws ────────────────────────────────────────────────────────────
 
 /// Upgrade an HTTP connection to a WebSocket and stream raw CSI frames.
 ///
+/// Returns `403 Forbidden` when the server is in `dump` output mode, since
+/// frames are being written exclusively to the session dump file.
+///
 /// Each binary message sent to the client is one unmodified frame as received
 /// from the ESP32 over serial. The client is responsible for decoding based
 /// on the active log mode (e.g. array-list text or COBS binary).
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
+    if *state.output_mode_tx.borrow() == OutputMode::Dump {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse {
+                success: false,
+                message: "Server is in dump-only mode; WebSocket streaming is disabled"
+                    .to_string(),
+            }),
+        )
+            .into_response();
+    }
     let rx = state.csi_tx.subscribe();
-    ws.on_upgrade(|socket| handle_socket(socket, rx))
+    ws.on_upgrade(|socket| handle_socket(socket, rx)).into_response()
 }
 
 async fn handle_socket(mut socket: WebSocket, mut rx: broadcast::Receiver<Vec<u8>>) {

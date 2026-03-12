@@ -2,8 +2,8 @@ use axum::{Json, extract::State, http::StatusCode};
 
 use crate::{
     models::{
-        ApiResponse, CollectionModeConfig, CsiConfig, DeviceConfig, LogModeConfig, TrafficConfig,
-        WifiConfig,
+        ApiResponse, CollectionModeConfig, CsiConfig, DeviceConfig, LogModeConfig, OutputMode,
+        OutputModeConfig, TrafficConfig, WifiConfig,
     },
     state::AppState,
 };
@@ -101,6 +101,50 @@ pub async fn set_log_mode(
         let _ = state.log_mode_tx.send(body.mode);
     }
     result
+}
+
+// ─── POST /api/config/output-mode ───────────────────────────────────────────
+
+/// Switch the server's CSI output mode at runtime.
+///
+/// Body:
+/// ```json
+/// { "mode": "stream" }   // default — broadcast via WebSocket
+/// { "mode": "dump" }     // write to session dump file; /api/ws returns 403
+/// { "mode": "both" }     // write to file AND broadcast
+/// ```
+///
+/// The change takes effect for the very next CSI frame received from the
+/// serial port. If no session has been started yet the dump destination will
+/// be set as soon as `POST /api/control/start` is called.
+pub async fn set_output_mode(
+    State(state): State<AppState>,
+    Json(body): Json<OutputModeConfig>,
+) -> (StatusCode, Json<ApiResponse>) {
+    let mode = match body.mode.to_ascii_lowercase().as_str() {
+        "stream" => OutputMode::Stream,
+        "dump" => OutputMode::Dump,
+        "both" => OutputMode::Both,
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    message: format!(
+                        "Unknown output mode '{other}'; expected stream, dump, or both"
+                    ),
+                }),
+            );
+        }
+    };
+    let _ = state.output_mode_tx.send(mode);
+    (
+        StatusCode::OK,
+        Json(ApiResponse {
+            success: true,
+            message: format!("Output mode set to {}", body.mode),
+        }),
+    )
 }
 
 // ─── Shared helper ──────────────────────────────────────────────────────────

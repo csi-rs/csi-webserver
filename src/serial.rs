@@ -1,6 +1,9 @@
+use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_serial::{SerialPortBuilderExt, SerialPortType};
+
+use crate::models::OutputMode;
 
 const DEFAULT_BAUD_RATE: u32 = 115_200;
 
@@ -87,6 +90,8 @@ pub async fn run_serial_task(
     mut cmd_rx: mpsc::Receiver<String>,
     csi_tx: broadcast::Sender<Vec<u8>>,
     log_mode_rx: watch::Receiver<String>,
+    mut output_mode_rx: watch::Receiver<OutputMode>,
+    mut session_file_rx: watch::Receiver<Option<String>>,
 ) {
     let baud = std::env::var("CSI_BAUD_RATE")
         .ok()
@@ -107,7 +112,62 @@ pub async fn run_serial_task(
     let mut reader = BufReader::new(reader);
     let mut buf = Vec::new();
 
+    // ── Dump-file state (owned exclusively by this task) ──────────────────
+    let mut current_mode = OutputMode::Stream;
+    let mut current_session_path: Option<String> = None;
+    let mut dump_file: Option<tokio::fs::File> = None;
+
     loop {
+        // ── React to runtime output-mode or session-file changes ──────────
+        let mode_changed = output_mode_rx.has_changed().unwrap_or(false);
+        let session_changed = session_file_rx.has_changed().unwrap_or(false);
+
+        if mode_changed {
+            current_mode = output_mode_rx.borrow_and_update().clone();
+        }
+        if session_changed {
+            match session_file_rx.borrow_and_update().clone() {
+                Some(path) => current_session_path = Some(path),
+                None => {
+                    // Session ended — close the dump file.
+                    dump_file = None;
+                    current_session_path = None;
+                    tracing::info!("Session ended — dump file closed");
+                }
+            }
+        }
+        if mode_changed || session_changed {
+            match current_mode {
+                OutputMode::Dump | OutputMode::Both => {
+                    if dump_file.is_none() {
+                        if let Some(ref path) = current_session_path {
+                            match OpenOptions::new()
+                                .write(true)
+                                .create(true)
+                                .truncate(true)
+                                .open(path)
+                                .await
+                            {
+                                Ok(f) => {
+                                    tracing::info!("Opened dump file: {path}");
+                                    dump_file = Some(f);
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to open dump file {path}: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
+                OutputMode::Stream => {
+                    // Drop the file handle; the file is flushed on drop.
+                    if dump_file.take().is_some() {
+                        tracing::info!("Switched to stream mode — dump file closed");
+                    }
+                }
+            }
+        }
+
         // Pick the frame delimiter based on the current log mode.
         // COBS uses null-byte (0x00) framing; all text modes use newline.
         let delimiter = {
@@ -133,8 +193,22 @@ pub async fn run_serial_task(
                             buf.pop();
                         }
                         if !buf.is_empty() {
-                            // Ignore send errors — zero subscribers is fine.
-                            let _ = csi_tx.send(buf.clone());
+                            // Write to dump file (u32 LE length-prefix + frame bytes).
+                            if matches!(current_mode, OutputMode::Dump | OutputMode::Both) {
+                                if let Some(ref mut file) = dump_file {
+                                    let len = buf.len() as u32;
+                                    if let Err(e) = file.write_all(&len.to_le_bytes()).await {
+                                        tracing::error!("Dump write error (len): {e}");
+                                    } else if let Err(e) = file.write_all(&buf).await {
+                                        tracing::error!("Dump write error (data): {e}");
+                                    }
+                                }
+                            }
+                            // Broadcast to WebSocket clients.
+                            if matches!(current_mode, OutputMode::Stream | OutputMode::Both) {
+                                // Ignore send errors — zero subscribers is fine.
+                                let _ = csi_tx.send(buf.clone());
+                            }
                         }
                         buf.clear();
                     }
